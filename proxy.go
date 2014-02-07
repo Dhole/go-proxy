@@ -29,6 +29,26 @@ func (h *HttpReply) Init() {
 	h.headerVals = make(map[string]string)
 }
 
+func (h *HttpRequest) String() string {
+	str := ""
+	str += fmt.Sprintf("%s %s\r\n", h.method, h.args)
+	for _, header := range h.headers {
+		str += fmt.Sprintf("%s: %s\r\n", header, h.headerVals[header])
+	}
+	str += fmt.Sprintf("\r\n")
+	return str
+}
+
+func (h *HttpReply) String() string {
+	str := ""
+	str += fmt.Sprintf("%s\r\n", h.status)
+	for _, header := range h.headers {
+		str += fmt.Sprintf("%s: %s\r\n", header, h.headerVals[header])
+	}
+	str += fmt.Sprintf("\r\n")
+	return str
+}
+
 func main() {
 	ln, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -45,10 +65,12 @@ func main() {
 }
 
 func handleHttpCon(connCli net.Conn) {
+	defer connCli.Close()
+	
 	writerCli := bufio.NewWriter(connCli)
 	readerCli := bufio.NewReader(connCli)
 	
-	reqLines, err := getHeader(readerCli)
+	reqLines, err := receiveHeader(readerCli)
 	if err != nil {
 		log.Println(err)		
 		return
@@ -56,22 +78,25 @@ func handleHttpCon(connCli net.Conn) {
 	
 	req, err := parseHttpRequest(reqLines)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 	
-	// fmt.Print(reqLines)
-	
+	// connect to destination server	
 	connSer, err := net.Dial("tcp", req.headerVals["Host"] + ":80")
 	if err != nil {
 		log.Println(err)		
 		return
 	}
+	defer connSer.Close()
+	
 	readerSer := bufio.NewReader(connSer)
 	writerSer := bufio.NewWriter(connSer)
+
 	sendHttpRequest(req, writerSer)
 	writerSer.Flush()
 	
-	repLines, err := getHeader(readerSer)
+	repLines, err := receiveHeader(readerSer)
 	if err != nil {
 		log.Println(err)		
 		return
@@ -79,38 +104,33 @@ func handleHttpCon(connCli net.Conn) {
 	
 	rep, err := parseHttpReply(repLines)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)		
+		return
 	}
 	
-	//fmt.Println(repLines)
-	fmt.Println("= Request =\n", req, "\n===========\n||")
-	fmt.Println("== Reply ==\n", rep, "\n===========\n")
+	fmt.Println("= Request =\n", req.String(), "\n===========\n||")
+	fmt.Println("== Reply ==\n", rep.String(), "\n===========\n")
+
 	sendHttpReply(rep, writerCli)
-	
-	l, _ := strconv.Atoi(rep.headerVals["Content-Length"])
-	body := make([]byte, l)
-	nRead := 0
 
-	for nRead < l {
-		n, err := readerSer.Read(body[nRead:])
-		if err != nil {
-			log.Println(err)
-		}
-		nRead += n
-	}
-
-	n2, err := writerCli.Write(body)
-	writerCli.Flush()
+	length, _ := strconv.Atoi(rep.headerVals["Content-Length"])
+	body, err := receiveBody(readerSer, length)
 	if err != nil {
 		log.Println(err)
+		return
 	}
-	fmt.Println("> > > Read: ", nRead, " Write: ", n2)
 	
-	connSer.Close()
-	connCli.Close()
+	_, err = writerCli.Write(body)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	writerCli.Flush()
+	
 }
 
-func getHeader(reader *bufio.Reader) ([]string, error) {
+func receiveHeader(reader *bufio.Reader) ([]string, error) {
 	var lines []string
 	for {
 		line, err := reader.ReadString('\n')
@@ -124,6 +144,21 @@ func getHeader(reader *bufio.Reader) ([]string, error) {
 		lines = append(lines, line[:len(line) - 2])
 	}
 	return lines, nil
+}
+
+func receiveBody(reader *bufio.Reader, length int) ([]byte, error) {
+	
+	body := make([]byte, length)
+	nRead := 0
+
+	for nRead < length {
+		n, err := reader.Read(body[nRead:])
+		if err != nil {
+			return nil, err
+		}
+		nRead += n
+	}
+	return body, nil
 }
 
 func parseHttpRequest(reqLines []string) (*HttpRequest, error) {
@@ -155,19 +190,11 @@ func parseHttpRequest(reqLines []string) (*HttpRequest, error) {
 }
 
 func sendHttpRequest(req *HttpRequest, writer *bufio.Writer) {
-	writer.WriteString(fmt.Sprintf("%s %s\r\n", req.method, req.args))
-	for _, header := range req.headers {
-		writer.WriteString(fmt.Sprintf("%s: %s\r\n", header, req.headerVals[header]))
-	}
-	writer.WriteString("\r\n")
+	writer.WriteString(req.String())
 }
 
 func sendHttpReply(rep *HttpReply, writer *bufio.Writer) {
-	writer.WriteString(fmt.Sprintf("%s\r\n", rep.status))
-	for _, header := range rep.headers {
-		writer.WriteString(fmt.Sprintf("%s: %s\r\n", header, rep.headerVals[header]))
-	}
-	writer.WriteString("\r\n")
+	writer.WriteString(rep.String())
 }
 
 func parseHttpReply(repLines []string) (*HttpReply, error) {
