@@ -21,14 +21,6 @@ type HttpReply struct {
 	headerVals map[string]string
 }
 
-func (h *HttpRequest) Init() {
-	h.headerVals = make(map[string]string)
-}
-
-func (h *HttpReply) Init() {
-	h.headerVals = make(map[string]string)
-}
-
 func (h *HttpRequest) String() string {
 	str := ""
 	str += fmt.Sprintf("%s %s\r\n", h.method, h.args)
@@ -113,19 +105,46 @@ func handleHttpCon(connCli net.Conn) {
 
 	sendHttpReply(rep, writerCli)
 
-	length, _ := strconv.Atoi(rep.headerVals["Content-Length"])
-	body, err := receiveBody(readerSer, length)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	
-	_, err = writerCli.Write(body)
-	if err != nil {
-		log.Println(err)
-		return
-	}
+	if rep.headerVals["Transfer-Encoding"] == "chunked" {
+		for {
+			// Receive chunk length
+			line, _ := readerSer.ReadString('\n')
+			length, _ := strconv.ParseUint(line[:len(line) - 2], 16, 64)
+			fmt.Println("Reading chunk lenght:", length)
 
+			writerCli.WriteString(fmt.Sprintf("%x\r\n", length))
+
+			// Receive chunk
+			chunk, err := receiveBytes(readerSer, int(length))
+			if err != nil {
+				log.Println(err)
+				return
+			}
+
+			writerCli.Write(chunk)
+			writerCli.WriteString("\r\n")
+			
+			// Discard \r\n
+			receiveBytes(readerSer, 2)
+			
+			if length == 0 {
+				break
+			}
+		}
+	} else {
+		length, _ := strconv.Atoi(rep.headerVals["Content-Length"])
+		body, err := receiveBytes(readerSer, length)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+	
+		_, err = writerCli.Write(body)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+	}
 	writerCli.Flush()
 	
 }
@@ -146,7 +165,7 @@ func receiveHeader(reader *bufio.Reader) ([]string, error) {
 	return lines, nil
 }
 
-func receiveBody(reader *bufio.Reader, length int) ([]byte, error) {
+func receiveBytes(reader *bufio.Reader, length int) ([]byte, error) {
 	
 	body := make([]byte, length)
 	nRead := 0
@@ -163,29 +182,16 @@ func receiveBody(reader *bufio.Reader, length int) ([]byte, error) {
 
 func parseHttpRequest(reqLines []string) (*HttpRequest, error) {
 	req := HttpRequest{}
-	req.Init()
-	isFirstLine := true
-	
-	for _, line := range reqLines {
-		if isFirstLine {
-			isFirstLine = false
-			
-			r := strings.SplitN(line, " ", 2)
-			if len(r) < 2 {
-				return nil, fmt.Errorf("Bad request: %s", line)
-			}
-			req.method = r[0]
-			req.args = r[1]
-		} else {
-			h := strings.SplitN(line, ": ", 2)
-			if len(h) < 2 {
-				log.Println("Bad header, ignoring: %s", line)
-				continue
-			}
-			req.headers = append(req.headers, h[0])
-			req.headerVals[h[0]] = h[1]
-		}
+
+	r := strings.SplitN(reqLines[0], " ", 2)
+	if len(r) < 2 {
+		return nil, fmt.Errorf("Bad request: %s", reqLines[0])
 	}
+	req.method = r[0]
+	req.args = r[1]
+	
+	req.headers, req.headerVals = parseHeaders(reqLines[1:])
+	
 	return &req, nil
 }
 
@@ -199,22 +205,25 @@ func sendHttpReply(rep *HttpReply, writer *bufio.Writer) {
 
 func parseHttpReply(repLines []string) (*HttpReply, error) {
 	rep := HttpReply{}
-	rep.Init()
-	isFirstLine := true
+	
+	rep.status = repLines[0]
+	rep.headers, rep.headerVals = parseHeaders(repLines[1:])
+	
+	return &rep, nil
+}
+
+func parseHeaders(repLines []string) ([]string, map[string]string) {
+	headers := []string{}
+	headerVals := make(map[string]string)
 	
 	for _, line := range repLines {
-		if isFirstLine {
-			isFirstLine = false
-			rep.status = line
-		} else {
-			h := strings.SplitN(line, ": ", 2)
-			if len(h) < 2 {
-				log.Println("Bad header, ignoring: %s", line)
-				continue
-			}
-			rep.headers = append(rep.headers, h[0])
-			rep.headerVals[h[0]] = h[1]
+		h := strings.SplitN(line, ": ", 2)
+		if len(h) < 2 {
+			log.Println("Bad header, ignoring: %s", line)
+			continue
 		}
+		headers = append(headers, h[0])
+		headerVals[h[0]] = h[1]
 	}
-	return &rep, nil
+	return headers, headerVals
 }
