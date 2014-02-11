@@ -110,7 +110,7 @@ func handleHttpCon(connCli net.Conn) {
 			// Receive chunk length
 			line, _ := readerSer.ReadString('\n')
 			length, _ := strconv.ParseUint(line[:len(line) - 2], 16, 64)
-			fmt.Println("Reading chunk lenght:", length)
+			// fmt.Println("Reading chunk lenght:", length)
 
 			writerCli.WriteString(fmt.Sprintf("%x\r\n", length))
 
@@ -120,25 +120,26 @@ func handleHttpCon(connCli net.Conn) {
 				log.Println(err)
 				return
 			}
-
-			writerCli.Write(chunk)
-			writerCli.WriteString("\r\n")
-			
 			// Discard \r\n
 			receiveBytes(readerSer, 2)
 			
+			writerCli.Write(chunk)
+			writerCli.WriteString("\r\n")
+			
+			// Check for end of chunked data
 			if length == 0 {
 				break
 			}
 		}
 	} else {
 		length, _ := strconv.Atoi(rep.headerVals["Content-Length"])
+		// Receive body from server
 		body, err := receiveBytes(readerSer, length)
 		if err != nil {
 			log.Println(err)
 			return
 		}
-	
+		// Send body to client
 		_, err = writerCli.Write(body)
 		if err != nil {
 			log.Println(err)
