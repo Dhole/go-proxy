@@ -43,6 +43,7 @@ func (h *HttpReply) String() string {
 
 func main() {
 	ln, err := net.Listen("tcp", ":8080")
+	asd
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -52,6 +53,7 @@ func main() {
 			log.Println(err)
 			continue
 		}
+		defer conn.Close()
 		go handleHttpCon(conn)
 	}
 }
@@ -74,7 +76,8 @@ func handleHttpCon(connCli net.Conn) {
 		return
 	}
 	
-	// connect to destination server	
+	// connect to destination server
+	// TODO: change Dial for DialTimeout, handle timeout
 	connSer, err := net.Dial("tcp", req.headerVals["Host"] + ":80")
 	if err != nil {
 		log.Println(err)		
@@ -182,7 +185,7 @@ func receiveBytes(reader *bufio.Reader, length int) ([]byte, error) {
 }
 
 func parseHttpRequest(reqLines []string) (*HttpRequest, error) {
-	req := HttpRequest{}
+	req := &HttpRequest{}
 
 	r := strings.SplitN(reqLines[0], " ", 2)
 	if len(r) < 2 {
@@ -193,7 +196,7 @@ func parseHttpRequest(reqLines []string) (*HttpRequest, error) {
 	
 	req.headers, req.headerVals = parseHeaders(reqLines[1:])
 	
-	return &req, nil
+	return req, nil
 }
 
 func sendHttpRequest(req *HttpRequest, writer *bufio.Writer) {
@@ -205,12 +208,12 @@ func sendHttpReply(rep *HttpReply, writer *bufio.Writer) {
 }
 
 func parseHttpReply(repLines []string) (*HttpReply, error) {
-	rep := HttpReply{}
+	rep := &HttpReply{}
 	
 	rep.status = repLines[0]
 	rep.headers, rep.headerVals = parseHeaders(repLines[1:])
 	
-	return &rep, nil
+	return rep, nil
 }
 
 func parseHeaders(repLines []string) ([]string, map[string]string) {
