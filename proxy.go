@@ -43,7 +43,7 @@ func (h *HttpReply) String() string {
 
 func main() {
 	ln, err := net.Listen("tcp", ":8080")
-	asd
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -63,8 +63,9 @@ func handleHttpCon(connCli net.Conn) {
 	
 	writerCli := bufio.NewWriter(connCli)
 	readerCli := bufio.NewReader(connCli)
+	bufCli := bufio.NewReadWriter(readerCli, writerCli)
 	
-	reqLines, err := receiveHeader(readerCli)
+	reqLines, err := receiveHeader(bufCli.Reader)
 	if err != nil {
 		log.Println(err)		
 		return
@@ -87,11 +88,12 @@ func handleHttpCon(connCli net.Conn) {
 	
 	readerSer := bufio.NewReader(connSer)
 	writerSer := bufio.NewWriter(connSer)
+	bufSer := bufio.NewReadWriter(readerSer, writerSer)
 
-	sendHttpRequest(req, writerSer)
-	writerSer.Flush()
+	sendHttpRequest(req, bufSer.Writer)
+	bufSer.Flush()
 	
-	repLines, err := receiveHeader(readerSer)
+	repLines, err := receiveHeader(bufSer.Reader)
 	if err != nil {
 		log.Println(err)		
 		return
@@ -111,23 +113,23 @@ func handleHttpCon(connCli net.Conn) {
 	if rep.headerVals["Transfer-Encoding"] == "chunked" {
 		for {
 			// Receive chunk length
-			line, _ := readerSer.ReadString('\n')
+			line, _ := bufSer.ReadString('\n')
 			length, _ := strconv.ParseUint(line[:len(line) - 2], 16, 64)
 			// fmt.Println("Reading chunk lenght:", length)
 
-			writerCli.WriteString(fmt.Sprintf("%x\r\n", length))
+			bufCli.WriteString(fmt.Sprintf("%x\r\n", length))
 
 			// Receive chunk
-			chunk, err := receiveBytes(readerSer, int(length))
+			chunk, err := receiveBytes(bufSer.Reader, int(length))
 			if err != nil {
 				log.Println(err)
 				return
 			}
 			// Discard \r\n
-			receiveBytes(readerSer, 2)
+			receiveBytes(bufSer.Reader, 2)
 			
-			writerCli.Write(chunk)
-			writerCli.WriteString("\r\n")
+			bufCli.Write(chunk)
+			bufCli.WriteString("\r\n")
 			
 			// Check for end of chunked data
 			if length == 0 {
@@ -137,19 +139,19 @@ func handleHttpCon(connCli net.Conn) {
 	} else {
 		length, _ := strconv.Atoi(rep.headerVals["Content-Length"])
 		// Receive body from server
-		body, err := receiveBytes(readerSer, length)
+		body, err := receiveBytes(bufSer.Reader, length)
 		if err != nil {
 			log.Println(err)
 			return
 		}
 		// Send body to client
-		_, err = writerCli.Write(body)
+		_, err = bufCli.Write(body)
 		if err != nil {
 			log.Println(err)
 			return
 		}
 	}
-	writerCli.Flush()
+	bufCli.Flush()
 	
 }
 
