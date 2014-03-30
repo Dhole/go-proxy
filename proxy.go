@@ -7,6 +7,12 @@ import (
 	"bufio"
 	"strings"
 	"strconv"
+	"io"
+	"os"
+	"os/signal"
+	"runtime"
+	"syscall"
+	//	"time"
 )
 
 type HttpRequest struct {
@@ -42,8 +48,17 @@ func (h *HttpReply) String() string {
 }
 
 func main() {
-	ln, err := net.Listen("tcp", ":8080")
 
+	sigchan := make(chan os.Signal, 10)
+	signal.Notify(sigchan, syscall.SIGUSR1)
+	go func(){
+		for _ = range sigchan {
+			log.Println("Goroutines:", runtime.NumGoroutine())
+			//log.Printf("captured %v", sig)
+		}
+	}()
+	
+	ln, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -53,7 +68,6 @@ func main() {
 			log.Println(err)
 			continue
 		}
-		defer conn.Close()
 		go handleHttpCon(conn)
 	}
 }
@@ -74,6 +88,92 @@ func handleHttpCon(connCli net.Conn) {
 	req, err := parseHttpRequest(reqLines)
 	if err != nil {
 		log.Println(err)
+		return
+	}
+
+
+	if (req.method == "CONNECT") {
+		
+		fmt.Println(req.method, req.args)
+		
+		connSer, err := net.Dial("tcp", strings.Split(req.args, " ")[0])
+		if err != nil {
+			log.Println(err)		
+			return
+		}
+		defer connSer.Close()
+		
+		readerSer := bufio.NewReader(connSer)
+		writerSer := bufio.NewWriter(connSer)
+		bufSer := bufio.NewReadWriter(readerSer, writerSer)		
+		
+		bufCli.WriteString("HTTP/1.1 200 OK\r\n\r\n")
+		bufCli.Flush()
+		//var c byte
+		fin := make(chan bool)
+
+		go func(bufSer *bufio.ReadWriter,
+			bufCli *bufio.ReadWriter, fin chan bool) {
+				//for {
+				//log.Println("reading from client")
+				io.Copy(bufSer.Writer, bufCli.Reader)
+				log.Println("finishing read from client")
+				fin <- true
+				//bufSer.Flush()
+				//}
+		}(bufSer, bufCli, fin)
+		
+		go func(bufSer *bufio.ReadWriter,
+			bufCli *bufio.ReadWriter, fin chan bool) {
+				//for {
+				//log.Println("reading from server")
+				io.Copy(bufCli.Writer, bufSer.Reader)
+				log.Println("finishing read from server")
+				fin <- true
+				//bufCli.Flush()
+				//}
+		}(bufSer, bufCli, fin)
+		////
+		//return
+		
+
+		//for {
+			//bufSer.ReadFrom(bufCli)
+			//bufCli.ReadFrom(bufSer)
+
+			//bufSer.WriteTo(bufCli)
+			//bufCli.WriteTo(bufSer)
+			//log.Println("reading byte from client")
+			//if bufCli.Reader.Buffered() > 0 {
+			//	log.Println("reading from client")
+			//	io.Copy(bufSer, bufCli)
+			//	bufCli.WriteTo(bufSer)
+				//c, err = bufCli.ReadByte()
+				//if err == nil {
+				//	bufSer.WriteByte(c)
+				//}
+			//}
+			//log.Println("reading from client 2")
+			//io.Copy(bufSer, bufCli)
+			//bufSer.Flush()
+			//log.Println("reading byte from server")
+			//if bufSer.Reader.Buffered() > 0 {
+			//	log.Println("reading from server")
+			//	io.Copy(bufCli, bufSer)
+			//	bufSer.WriteTo(bufCli)
+				//c, err = bufSer.ReadByte()
+				//if err == nil {
+				//	bufCli.WriteByte(c)
+				//}
+			//}
+			//bufCli.Flush()
+			//log.Println("it")
+		//time.Sleep(100000000)
+		//}
+		//time.Sleep(5000000000)
+		<-fin
+		fmt.Println("FIN")
+
 		return
 	}
 	
@@ -105,8 +205,8 @@ func handleHttpCon(connCli net.Conn) {
 		return
 	}
 	
-	fmt.Println("= Request =\n", req.String(), "\n===========\n||")
-	fmt.Println("== Reply ==\n", rep.String(), "\n===========\n")
+	fmt.Print("= Request =\n", req, "\n===========\n||\n")
+	fmt.Print("== Reply ==\n", rep, "\n===========\n\n")
 
 	sendHttpReply(rep, writerCli)
 
@@ -120,8 +220,8 @@ func handleHttpCon(connCli net.Conn) {
 			bufCli.WriteString(fmt.Sprintf("%x\r\n", length))
 
 			// Receive chunk
-			chunk, err := receiveBytes(bufSer.Reader, int(length))
-			if err != nil {
+			chunk, n, err := receiveBytes(bufSer.Reader, int(length))
+			if err != nil && n < int(length) {
 				log.Println(err)
 				return
 			}
@@ -139,8 +239,8 @@ func handleHttpCon(connCli net.Conn) {
 	} else {
 		length, _ := strconv.Atoi(rep.headerVals["Content-Length"])
 		// Receive body from server
-		body, err := receiveBytes(bufSer.Reader, length)
-		if err != nil {
+		body, n, err := receiveBytes(bufSer.Reader, length)
+		if err != nil && n < length {
 			log.Println(err)
 			return
 		}
@@ -171,19 +271,20 @@ func receiveHeader(reader *bufio.Reader) ([]string, error) {
 	return lines, nil
 }
 
-func receiveBytes(reader *bufio.Reader, length int) ([]byte, error) {
+func receiveBytes(reader *bufio.Reader, length int) (body []byte, nRead int, err error) {
 	
-	body := make([]byte, length)
-	nRead := 0
+	body = make([]byte, length)
 
 	for nRead < length {
-		n, err := reader.Read(body[nRead:])
-		if err != nil {
-			return nil, err
-		}
+		n, er := reader.Read(body[nRead:])
 		nRead += n
+
+		if er != nil {
+			err = er
+			break
+		}
 	}
-	return body, nil
+	return body, nRead, err
 }
 
 func parseHttpRequest(reqLines []string) (*HttpRequest, error) {
