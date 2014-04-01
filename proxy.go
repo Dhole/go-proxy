@@ -8,12 +8,10 @@ import (
 	"strings"
 	"strconv"
 	"io"
-	"os"
-	"os/signal"
-	"runtime"
-	"syscall"
+	"net/http"
 	//	"time"
 )
+import _ "net/http/pprof"
 
 type HttpRequest struct {
 	method, args string
@@ -49,13 +47,9 @@ func (h *HttpReply) String() string {
 
 func main() {
 
-	sigchan := make(chan os.Signal, 10)
-	signal.Notify(sigchan, syscall.SIGUSR1)
-	go func(){
-		for _ = range sigchan {
-			log.Println("Goroutines:", runtime.NumGoroutine())
-			//log.Printf("captured %v", sig)
-		}
+	// enable profiling on http://localhost:6060/debug/pprof
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
 	}()
 	
 	ln, err := net.Listen("tcp", ":8080")
@@ -78,105 +72,50 @@ func handleHttpCon(connCli net.Conn) {
 	writerCli := bufio.NewWriter(connCli)
 	readerCli := bufio.NewReader(connCli)
 	bufCli := bufio.NewReadWriter(readerCli, writerCli)
+
+	for {
+		req, err := receiveHttpRequest(bufCli.Reader)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		fmt.Println(req)
+		
+		switch req.method {
+		case "CONNECT":
+			methodConnect(req, bufCli)
+			return
+		case "GET":
+			methodGet(req, bufCli)
+		}
+		return
+	}	
+}
+
+func methodConnect(req *HttpRequest, bufCli *bufio.ReadWriter) {
+		
+	//fmt.Println(req.method, req.args)
 	
-	reqLines, err := receiveHeader(bufCli.Reader)
+	connSer, err := net.Dial("tcp", strings.Split(req.args, " ")[0])
 	if err != nil {
 		log.Println(err)		
 		return
 	}
+	defer connSer.Close()
 	
-	req, err := parseHttpRequest(reqLines)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-
-	if (req.method == "CONNECT") {
-		
-		fmt.Println(req.method, req.args)
-		
-		connSer, err := net.Dial("tcp", strings.Split(req.args, " ")[0])
-		if err != nil {
-			log.Println(err)		
-			return
-		}
-		defer connSer.Close()
-		
-		readerSer := bufio.NewReader(connSer)
-		writerSer := bufio.NewWriter(connSer)
-		bufSer := bufio.NewReadWriter(readerSer, writerSer)		
-		
-		bufCli.WriteString("HTTP/1.1 200 OK\r\n\r\n")
-		bufCli.Flush()
-		//var c byte
-		fin := make(chan bool)
-
-		go func(bufSer *bufio.ReadWriter,
-			bufCli *bufio.ReadWriter, fin chan bool) {
-				//for {
-				//log.Println("reading from client")
-				io.Copy(bufSer.Writer, bufCli.Reader)
-				log.Println("finishing read from client")
-				fin <- true
-				//bufSer.Flush()
-				//}
-		}(bufSer, bufCli, fin)
-		
-		go func(bufSer *bufio.ReadWriter,
-			bufCli *bufio.ReadWriter, fin chan bool) {
-				//for {
-				//log.Println("reading from server")
-				io.Copy(bufCli.Writer, bufSer.Reader)
-				log.Println("finishing read from server")
-				fin <- true
-				//bufCli.Flush()
-				//}
-		}(bufSer, bufCli, fin)
-		////
-		//return
-		
-
-		//for {
-			//bufSer.ReadFrom(bufCli)
-			//bufCli.ReadFrom(bufSer)
-
-			//bufSer.WriteTo(bufCli)
-			//bufCli.WriteTo(bufSer)
-			//log.Println("reading byte from client")
-			//if bufCli.Reader.Buffered() > 0 {
-			//	log.Println("reading from client")
-			//	io.Copy(bufSer, bufCli)
-			//	bufCli.WriteTo(bufSer)
-				//c, err = bufCli.ReadByte()
-				//if err == nil {
-				//	bufSer.WriteByte(c)
-				//}
-			//}
-			//log.Println("reading from client 2")
-			//io.Copy(bufSer, bufCli)
-			//bufSer.Flush()
-			//log.Println("reading byte from server")
-			//if bufSer.Reader.Buffered() > 0 {
-			//	log.Println("reading from server")
-			//	io.Copy(bufCli, bufSer)
-			//	bufSer.WriteTo(bufCli)
-				//c, err = bufSer.ReadByte()
-				//if err == nil {
-				//	bufCli.WriteByte(c)
-				//}
-			//}
-			//bufCli.Flush()
-			//log.Println("it")
-		//time.Sleep(100000000)
-		//}
-		//time.Sleep(5000000000)
-		<-fin
-		fmt.Println("FIN")
-
-		return
-	}
+	readerSer := bufio.NewReader(connSer)
+	writerSer := bufio.NewWriter(connSer)
+	bufSer := bufio.NewReadWriter(readerSer, writerSer)		
 	
+	bufCli.WriteString("HTTP/1.1 200 OK\r\n\r\n")
+	bufCli.Flush()
+
+	tunnel(bufCli, bufSer)
+	
+	return
+}
+
+func methodGet(req *HttpRequest, bufCli *bufio.ReadWriter) {
 	// connect to destination server
 	// TODO: change Dial for DialTimeout, handle timeout
 	connSer, err := net.Dial("tcp", req.headerVals["Host"] + ":80")
@@ -205,10 +144,10 @@ func handleHttpCon(connCli net.Conn) {
 		return
 	}
 	
-	fmt.Print("= Request =\n", req, "\n===========\n||\n")
-	fmt.Print("== Reply ==\n", rep, "\n===========\n\n")
+	//fmt.Print("= Request =\n", req, "\n===========\n||\n")
+	//fmt.Print("== Reply ==\n", rep, "\n===========\n\n")
 
-	sendHttpReply(rep, writerCli)
+	sendHttpReply(rep, bufCli.Writer)
 
 	if rep.headerVals["Transfer-Encoding"] == "chunked" {
 		for {
@@ -252,9 +191,49 @@ func handleHttpCon(connCli net.Conn) {
 		}
 	}
 	bufCli.Flush()
-	
 }
 
+// Tunnel connections and block
+func tunnel(rw0 io.ReadWriter, rw1 io.ReadWriter) {
+	
+	go io.Copy(rw0, rw1)
+	io.Copy(rw1, rw0)
+}
+
+func receiveHttpRequest(reader *bufio.Reader) (req *HttpRequest, err error){
+
+	reqLines, err := receiveHeader(reader)
+	if err != nil {
+		log.Println(err)		
+		return nil, err
+	}
+	
+	req, err = parseHttpRequest(reqLines)
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+	
+	return req, nil
+}
+
+func receiveHttpReply(reader *bufio.Reader) (req *HttpReply, err error){
+
+	repLines, err := receiveHeader(reader)
+	if err != nil {
+		log.Println(err)		
+		return nil, err
+	}
+	
+	rep, err := parseHttpReply(repLines)
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+	
+	return rep, nil
+}
+	
 func receiveHeader(reader *bufio.Reader) ([]string, error) {
 	var lines []string
 	for {
