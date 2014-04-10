@@ -1,4 +1,4 @@
-package main
+package goproxy
 
 import (
 	"net"
@@ -8,7 +8,6 @@ import (
 	"strings"
 	"strconv"
 	"io"
-	"net/http"
 	"time"
 )
 import _ "net/http/pprof"
@@ -19,12 +18,14 @@ type HttpRequest struct {
 	method, args string
 	headers []string
 	headerVals map[string]string
+	body string
 }
 
 type HttpReply struct {
 	status string
 	headers []string
 	headerVals map[string]string
+	body string
 }
 
 func (h *HttpRequest) String() string {
@@ -47,25 +48,21 @@ func (h *HttpReply) String() string {
 	return str
 }
 
-func main() {
+
+func StartProxy(httpPort, httpsPort uint) {
 	log.SetFlags(log.Lshortfile | log.Ldate | log.Ltime)
 	
-	// enable profiling on http://localhost:6060/debug/pprof
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-	
-	ln, err := net.Listen("tcp", ":8080")
+	ln, err := net.Listen("tcp", fmt.Sprint(":", httpPort))
 	if err != nil {
 		log.Fatal(err)
 	}
-	lns, err := net.Listen("tcp", ":8443")
+	lns, err := net.Listen("tcp", fmt.Sprint(":", httpsPort))
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	go listenLoop(ln, handleHttpCon)
-	listenLoop(lns, handleHttpsCon)
+	go listenLoop(lns, handleHttpsCon)
 }
 
 func listenLoop(ln net.Listener, h connHandle) {
@@ -123,6 +120,7 @@ func handleHttpCon(connCli net.Conn) {
 			one := make([]byte, 1)
 			if _, err := connSer.Read(one); err == io.EOF {
 				log.Println("Server closed connection")
+				connCli.Close()
 				return
 			} else {
 				connSer.SetReadDeadline(time.Time{})
@@ -158,7 +156,7 @@ func getServerConn(req *HttpRequest) (connSer net.Conn, err error) {
 	return connSer, nil
 }
 
-func methodConnect(req *HttpRequest, bufCli, bufSer *bufio.ReadWriter) {	
+func methodConnect(req *HttpRequest, bufCli, bufSer *bufio.ReadWriter) {
 	bufCli.WriteString("HTTP/1.1 200 OK\r\n\r\n")
 	bufCli.Flush()
 
@@ -175,13 +173,7 @@ func methodGet(req *HttpRequest, bufCli, bufSer *bufio.ReadWriter) (err error){
 	}
 	bufSer.Flush()
 	
-	repLines, err := receiveHeader(bufSer.Reader)
-	if err != nil {
-		log.Println(err)		
-		return err
-	}
-	
-	rep, err := parseHttpReply(repLines)
+	rep, err := receiveHttpReply(bufSer.Reader)
 	if err != nil {
 		log.Println(err)		
 		return err
@@ -231,7 +223,7 @@ func transferChunked(bufSer *bufio.ReadWriter, bufCli *bufio.ReadWriter) (err er
 		if err != nil && n < int(length) {
 			log.Println(err)
 			return err
-			}
+		}
 		// Discard \r\n
 		receiveBytes(bufSer.Reader, 2)
 			
@@ -270,13 +262,11 @@ func receiveHttpRequest(reader *bufio.Reader) (req *HttpRequest, err error){
 func receiveHttpReply(reader *bufio.Reader) (req *HttpReply, err error){
 	repLines, err := receiveHeader(reader)
 	if err != nil {
-		log.Println(err)		
 		return nil, err
 	}
 	
 	rep, err := parseHttpReply(repLines)
 	if err != nil {
-		log.Println(err)
 		return nil, err
 	}
 	
